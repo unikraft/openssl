@@ -1,0 +1,152 @@
+From 828d8259dc8256723f3dade31a1d46baa5261582 Mon Sep 17 00:00:00 2001
+From: Alex Apostolescu <alexx.apostolescu@gmail.com>
+Date: Tue, 14 May 2024 11:41:41 +0300
+Subject: [PATCH 1/1] Use uk/random.h instead of RDRAND and RDSEED
+
+Instead of raw usage of RDRAND and RDSEED use the hardware randomness
+exposed from Unikraft. This is configured from the menu config at
+compile time.
+---
+ crypto/engine/eng_rdrand.c | 35 +++++++++++++++-
+ crypto/x86_64cpuid.s       | 82 --------------------------------------
+ 2 files changed, 34 insertions(+), 83 deletions(-)
+
+diff --git a/crypto/engine/eng_rdrand.c b/crypto/engine/eng_rdrand.c
+index 261e5de..e1a5eca 100644
+--- a/crypto/engine/eng_rdrand.c
++++ b/crypto/engine/eng_rdrand.c
+@@ -20,7 +20,40 @@
+      defined(__x86_64) || defined(__x86_64__) || \
+      defined(_M_AMD64) || defined (_M_X64)) && defined(OPENSSL_CPUID_OBJ)
+ 
+-size_t OPENSSL_ia32_rdrand_bytes(unsigned char *buf, size_t len);
++#include <uk/random.h>
++size_t OPENSSL_ia32_rdrand_bytes(unsigned char *buf, size_t len)
++{
++    return uk_random_fill_buffer(buf, len);
++}
++
++size_t OPENSSL_ia32_rdseed_bytes(unsigned char *buf, size_t len) {
++    if (!buf) {
++        return 0;
++    }
++
++    __sz step, chunk_size, i;
++	__u64 rd;
++	int ret;
++
++	step = sizeof(__u64);
++	chunk_size = buflen % step;
++
++	for (i = 0; i < buflen - chunk_size; i += step) {
++		ret = uk_random_seed_u64((__u64 *)((char *)buf + i));
++		if (unlikely(ret))
++			return ret;
++	}
++
++	/* fill the remaining bytes of the buffer */
++	if (chunk_size > 0) {
++		ret = uk_random_seed_u64(&rd);
++		if (unlikely(ret))
++			return ret;
++		memcpy((char *)buf + i, &rd, chunk_size);
++	}
++
++	return buflen;
++}
+ 
+ static int get_random_bytes(unsigned char *buf, int num)
+ {
+diff --git a/crypto/x86_64cpuid.s b/crypto/x86_64cpuid.s
+index fd17eaa..36362b8 100644
+--- a/crypto/x86_64cpuid.s
++++ b/crypto/x86_64cpuid.s
+@@ -379,85 +379,3 @@ OPENSSL_instrument_bus2:
+ 	subq	%rcx,%rax
+ 	.byte	0xf3,0xc3
+ .size	OPENSSL_instrument_bus2,.-OPENSSL_instrument_bus2
+-.globl	OPENSSL_ia32_rdrand_bytes
+-.type	OPENSSL_ia32_rdrand_bytes,@function
+-.align	16
+-OPENSSL_ia32_rdrand_bytes:
+-	xorq	%rax,%rax
+-	cmpq	$0,%rsi
+-	je	.Ldone_rdrand_bytes
+-
+-	movq	$8,%r11
+-.Loop_rdrand_bytes:
+-.byte	73,15,199,242
+-	jc	.Lbreak_rdrand_bytes
+-	decq	%r11
+-	jnz	.Loop_rdrand_bytes
+-	jmp	.Ldone_rdrand_bytes
+-
+-.align	16
+-.Lbreak_rdrand_bytes:
+-	cmpq	$8,%rsi
+-	jb	.Ltail_rdrand_bytes
+-	movq	%r10,(%rdi)
+-	leaq	8(%rdi),%rdi
+-	addq	$8,%rax
+-	subq	$8,%rsi
+-	jz	.Ldone_rdrand_bytes
+-	movq	$8,%r11
+-	jmp	.Loop_rdrand_bytes
+-
+-.align	16
+-.Ltail_rdrand_bytes:
+-	movb	%r10b,(%rdi)
+-	leaq	1(%rdi),%rdi
+-	incq	%rax
+-	shrq	$8,%r10
+-	decq	%rsi
+-	jnz	.Ltail_rdrand_bytes
+-
+-.Ldone_rdrand_bytes:
+-	xorq	%r10,%r10
+-	.byte	0xf3,0xc3
+-.size	OPENSSL_ia32_rdrand_bytes,.-OPENSSL_ia32_rdrand_bytes
+-.globl	OPENSSL_ia32_rdseed_bytes
+-.type	OPENSSL_ia32_rdseed_bytes,@function
+-.align	16
+-OPENSSL_ia32_rdseed_bytes:
+-	xorq	%rax,%rax
+-	cmpq	$0,%rsi
+-	je	.Ldone_rdseed_bytes
+-
+-	movq	$8,%r11
+-.Loop_rdseed_bytes:
+-.byte	73,15,199,250
+-	jc	.Lbreak_rdseed_bytes
+-	decq	%r11
+-	jnz	.Loop_rdseed_bytes
+-	jmp	.Ldone_rdseed_bytes
+-
+-.align	16
+-.Lbreak_rdseed_bytes:
+-	cmpq	$8,%rsi
+-	jb	.Ltail_rdseed_bytes
+-	movq	%r10,(%rdi)
+-	leaq	8(%rdi),%rdi
+-	addq	$8,%rax
+-	subq	$8,%rsi
+-	jz	.Ldone_rdseed_bytes
+-	movq	$8,%r11
+-	jmp	.Loop_rdseed_bytes
+-
+-.align	16
+-.Ltail_rdseed_bytes:
+-	movb	%r10b,(%rdi)
+-	leaq	1(%rdi),%rdi
+-	incq	%rax
+-	shrq	$8,%r10
+-	decq	%rsi
+-	jnz	.Ltail_rdseed_bytes
+-
+-.Ldone_rdseed_bytes:
+-	xorq	%r10,%r10
+-	.byte	0xf3,0xc3
+-.size	OPENSSL_ia32_rdseed_bytes,.-OPENSSL_ia32_rdseed_bytes
+-- 
+2.25.1
+
